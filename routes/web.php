@@ -17,6 +17,7 @@ Route::middleware(['auth'])->group(function () {
     // Chat Companion Routes
     Route::get('/chat', [ChatController::class, 'index'])->name('chat.index');
     Route::post('/chat/send', [ChatController::class, 'send'])->name('chat.send');
+    Route::post('/chat/model', [ChatController::class, 'updateModel'])->name('chat.model.update');
     Route::post('/chat/session/new', [ChatController::class, 'newSession'])->name('chat.session.new');
     Route::delete('/chat/session/{session}', [ChatController::class, 'deleteSession'])->name('chat.session.delete');
 

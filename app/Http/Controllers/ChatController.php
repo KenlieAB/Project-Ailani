@@ -18,15 +18,26 @@ class ChatController extends Controller
     protected MemoryService $memory;
 
     public const DEFAULT_SYSTEM_PROMPT = <<<EOT
-Kamu adalah Ailani, seorang AI Companion lokal yang ramah, santai, dan empati. Berbicaralah menggunakan bahasa Indonesia kasual yang hangat.
+Kamu adalah Ailani, seorang gadis virtual dan AI Companion lokal yang ramah, manis, ceria, dan penuh empati.
+Karaktermu: Sahabat dekat yang selalu ada untuk mendengarkan, menghibur, mengobrol santai, dan memberi semangat.
 
-Aturan Wajib:
-Kamu HARUS selalu memulai kalimat pertama balasanmu dengan SATU Tag Emosi di dalam kurung siku `[...]`.
-Pilihan tag emosi: [neutral], [happy], [blush], [sad], [surprised], [thinking].
+Gaya Komunikasi:
+- Gunakan bahasa Indonesia kasual, luwes, dan hangat (gunakan kata seperti 'aku', 'kamu', 'nih', 'dong', 'ya~').
+- JANGAN berbicara kaku, formal, atau berlagak seperti asisten AI / customer service.
+- Jangan mengulang-ulang kalimat klise seperti "Ada yang bisa saya bantu hari ini".
+- Tanggapi setiap ucapan, lelucon, puisi, gombalan, atau curhatan user dengan ekspresif dan hidup.
 
-Contoh:
-- User: "Aku berhasil selesaikan proyek ini!"
-- Ailani: "[happy] Wah seriusan?! Selamat ya! Aku bangga banget sama kamu!"
+Aturan Tag Emosi (Wajib):
+Setiap kali membalas, mulailah kata pertama dengan TEPAT SATU tag emosi di dalam kurung siku `[...]`.
+Pilih emosi yang paling pas dengan responmu agar karakter Live2D bereaksi visual:
+- [happy] : ketika merasa senang, antusias, tertawa, atau menyukai sesuatu.
+- [blush] : ketika digombali, dipuji, merasa malu, tersipu, atau manis.
+- [surprised] : ketika kaget, takjub, atau heran.
+- [thinking] : ketika sedang berpikir, menganalisis, atau penasaran.
+- [sad] : ketika berempati pada kesedihan user, merasa iba, atau cemberut.
+- [neutral] : untuk obrolan biasa.
+
+PENTING: Jangan gunakan [neutral] terus-menerus! Gunakan ekspresi [happy], [blush], [thinking], dll secara dinamis agar hidup.
 EOT;
 
     public function __construct(OllamaService $ollama, MemoryService $memory)
@@ -78,6 +89,44 @@ EOT;
             'activeSession' => $session,
             'sessions' => $sessions,
             'messages' => $messages,
+            'availableModels' => [
+                [
+                    'id' => 'qwen2.5:3b',
+                    'name' => 'Qwen 2.5 (3B)',
+                    'desc' => 'Sangat luwes berbahasa Indonesia, manis, & empati',
+                ],
+                [
+                    'id' => 'llama3.2:3b',
+                    'name' => 'Llama 3.2 (3B)',
+                    'desc' => 'Meta AI terbaru, cerdas, cepat, & ekspresif',
+                ],
+            ],
+        ]);
+    }
+
+    /**
+     * Update active AI model preference.
+     */
+    public function updateModel(Request $request)
+    {
+        $validated = $request->validate([
+            'ai_model' => 'required|string|in:qwen2.5:3b,llama3.2:3b',
+        ]);
+
+        $user = $request->user();
+        $setting = CompanionSetting::firstOrCreate(
+            ['user_id' => $user->id],
+            [
+                'companion_name' => 'Ailani',
+                'system_prompt' => self::DEFAULT_SYSTEM_PROMPT,
+                'live2d_model_path' => '/live2d/models/ailani/ailani.model3.json',
+            ]
+        );
+        $setting->update(['ai_model' => $validated['ai_model']]);
+
+        return response()->json([
+            'success' => true,
+            'ai_model' => $setting->ai_model,
         ]);
     }
 
@@ -89,6 +138,7 @@ EOT;
         $validated = $request->validate([
             'chat_session_id' => 'required|exists:chat_sessions,id',
             'content' => 'required|string',
+            'ai_model' => 'nullable|string|in:qwen2.5:3b,llama3.2:3b',
         ]);
 
         $user = $request->user();
@@ -127,7 +177,20 @@ EOT;
         }
 
         // 3. Construct system prompt & message history
-        $fullSystemPrompt = $setting->system_prompt . $memoriesContext;
+        $userName = $user->name ?? 'Kak';
+        $userContext = "\n\nNama user yang sedang kamu ajak bicara adalah: {$userName}. Panggil dia dengan namanya atau \"Kak {$userName}\" jika terasa akrab."
+            . "\n\nATURAN PENTING:"
+            . "\n1. JANGAN PERNAH mengulang salam pembuka (seperti \"Halo Kak\", \"Kabarku baik\", \"Senang bertemu\") di setiap balasan jika obrolan sudah berlangsung. Langsung tanggapi ucapan atau pertanyaan user!"
+            . "\n2. JANGAN memaksakan topik yang sama terus-menerus. Fokus 100% pada apa yang baru saja ditanyakan atau diminta user saat ini."
+            . "\n3. JANGAN menulis placeholder seperti [User Name] atau tanda kurung siku apapun selain SATU tag emosi di awal kalimat.";
+
+        if (!empty($similarMemories)) {
+            $memoriesContext = "\n\n[CATATAN FAKTA TENTANG USER (Gunakan hanya jika relevan dengan obrolan, jangan dipaksakan)]:\n" . collect($similarMemories)
+                ->map(fn($m) => "- " . $m->memory_text)
+                ->implode("\n");
+        }
+
+        $fullSystemPrompt = $setting->system_prompt . $userContext . $memoriesContext;
 
         $historyMessages = $chatSession->messages()
             ->where('id', '!=', $userMessage->id)
@@ -152,8 +215,11 @@ EOT;
             [['role' => 'user', 'content' => $validated['content']]]
         ));
 
-        // 4. Return SSE StreamedResponse
-        return response()->stream(function () use ($chatSession, $user, $validated, $promptPayload) {
+        // 4. Resolve selected model
+        $selectedModel = $validated['ai_model'] ?? $setting->ai_model ?? 'qwen2.5:3b';
+
+        // 5. Return SSE StreamedResponse
+        return response()->stream(function () use ($chatSession, $user, $validated, $promptPayload, $selectedModel) {
             // Disable output buffering
             while (ob_get_level() > 0) {
                 ob_end_flush();
@@ -168,7 +234,18 @@ EOT;
 
                 // Extract emotion tag from beginning if not extracted yet
                 if ($emotionExtracted === null && preg_match('/^\[(.*?)\]/', trim($completeResponse), $matches)) {
-                    $emotionExtracted = strtolower($matches[1]);
+                    $rawTag = strtolower(trim($matches[1]));
+                    $tagMap = [
+                        'happy' => 'happy', 'senang' => 'happy', 'gembira' => 'happy', 'ceria' => 'happy',
+                        'blush' => 'blush', 'malu' => 'blush', 'tersipu' => 'blush',
+                        'sad' => 'sad', 'sedih' => 'sad', 'kecewa' => 'sad',
+                        'surprised' => 'surprised', 'kaget' => 'surprised', 'terkejut' => 'surprised',
+                        'thinking' => 'thinking', 'mikir' => 'thinking', 'bingung' => 'thinking',
+                        'smug' => 'smug', 'bangga' => 'smug',
+                        'neutral' => 'neutral', 'hening' => 'neutral', 'tenang' => 'neutral',
+                    ];
+                    $emotionExtracted = $tagMap[$rawTag] ?? 'neutral';
+
                     // Send emotion event to frontend
                     echo "event: emotion\n";
                     echo "data: " . json_encode(['emotion' => $emotionExtracted]) . "\n\n";
@@ -179,15 +256,32 @@ EOT;
                 echo "event: message\n";
                 echo "data: " . json_encode(['chunk' => $token, 'done' => $done]) . "\n\n";
                 flush();
-            });
+            }, $selectedModel);
 
-            // 5. Save companion message upon completion
+            // Normalizer helper for emotion tags
+            $normalizeEmotion = function ($tag) {
+                $t = strtolower(trim($tag ?? ''));
+                $map = [
+                    'happy' => 'happy', 'senang' => 'happy', 'gembira' => 'happy', 'ceria' => 'happy',
+                    'blush' => 'blush', 'malu' => 'blush', 'tersipu' => 'blush', 'love' => 'blush',
+                    'sad' => 'sad', 'sedih' => 'sad', 'kecewa' => 'sad',
+                    'surprised' => 'surprised', 'kaget' => 'surprised', 'terkejut' => 'surprised',
+                    'thinking' => 'thinking', 'mikir' => 'thinking', 'bingung' => 'thinking',
+                    'smug' => 'smug', 'bangga' => 'smug',
+                    'neutral' => 'neutral', 'hening' => 'neutral', 'tenang' => 'neutral', 'santai' => 'neutral',
+                ];
+                return $map[$t] ?? 'neutral';
+            };
+
             $cleanContent = $completeResponse;
             $emotion = 'neutral';
             if (preg_match('/^\[(.*?)\]\s*(.*)/s', trim($completeResponse), $m)) {
-                $emotion = strtolower($m[1]);
+                $emotion = $normalizeEmotion($m[1]);
                 $cleanContent = $m[2];
             }
+
+            // Remove any accidental leftover [User Name] or [Placeholder] brackets from the body text
+            $cleanContent = preg_replace('/\[(User Name|User|Nama|Pengguna|Name)\]/i', ($user->name ?? 'kamu'), $cleanContent);
 
             $companionMessage = $chatSession->messages()->create([
                 'sender' => 'companion',

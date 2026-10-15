@@ -13,6 +13,7 @@ class CompanionSetting extends Model
     protected $fillable = [
         'user_id',
         'companion_name',
+        'ai_model',
         'system_prompt',
         'live2d_model_path',
     ];

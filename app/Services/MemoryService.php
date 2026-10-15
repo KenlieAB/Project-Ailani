@@ -109,8 +109,21 @@ class MemoryService
             if (!empty($result) && strtoupper($result) !== 'NONE' && !str_contains(strtoupper($result), 'NONE')) {
                 // Remove quotes if any
                 $cleanFact = trim($result, " \"'\n\r\t");
-                $this->saveMemory($userId, $cleanFact);
-                Log::info("Extracted memory for user {$userId}: {$cleanFact}");
+
+                // Ignore if it contains template placeholder or is too short
+                if (strlen($cleanFact) < 10 || preg_match('/\[User Name\]|NONE/i', $cleanFact)) {
+                    return;
+                }
+
+                // Check if identical or very similar fact already exists for this user
+                $exists = Memory::where('user_id', $userId)
+                    ->where('memory_text', $cleanFact)
+                    ->exists();
+
+                if (!$exists) {
+                    $this->saveMemory($userId, $cleanFact);
+                    Log::info("Extracted memory for user {$userId}: {$cleanFact}");
+                }
             }
         } catch (\Exception $e) {
             Log::warning('Fact extraction failed: ' . $e->getMessage());

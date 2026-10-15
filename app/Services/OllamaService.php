@@ -14,7 +14,7 @@ class OllamaService
     public function __construct()
     {
         $this->baseUrl = config('services.ollama.base_url', env('OLLAMA_BASE_URL', 'http://localhost:11434'));
-        $this->model = config('services.ollama.model', env('OLLAMA_MODEL', 'qwen2.5-coder:1.5b'));
+        $this->model = config('services.ollama.model', env('OLLAMA_MODEL', 'qwen2.5:3b'));
         $this->embeddingModel = config('services.ollama.embedding_model', env('OLLAMA_EMBEDDING_MODEL', 'nomic-embed-text:latest'));
     }
 
@@ -26,17 +26,22 @@ class OllamaService
      * @param callable $callback function(string $token, bool $done): void
      * @return string Complete combined response
      */
-    public function streamChat(array $messages, callable $callback): string
+    public function streamChat(array $messages, callable $callback, ?string $model = null): string
     {
         $sanitizedMessages = array_values(array_filter($messages, fn($m) => !empty($m['content'] ?? '')));
+        $targetModel = $model ?: $this->model;
 
         $payload = [
-            'model' => $this->model,
+            'model' => $targetModel,
             'messages' => $sanitizedMessages,
             'stream' => true,
             'options' => [
                 'num_ctx' => 4096,
                 'temperature' => 0.7,
+                'repeat_penalty' => 1.12,
+                'top_p' => 0.9,
+                'top_k' => 40,
+                'min_p' => 0.05,
             ],
         ];
 
@@ -91,7 +96,7 @@ class OllamaService
             $callback($errMsg, true);
             $fullContent = $errMsg;
         } elseif ($httpCode >= 400 && empty($fullContent)) {
-            $errMsg = "[sad] Ollama mengembalikan kode status HTTP {$httpCode}. Pastikan model '{$this->model}' dapat dimuat.";
+            $errMsg = "[sad] Ollama mengembalikan kode status HTTP {$httpCode}. Pastikan model '{$targetModel}' dapat dimuat.";
             Log::error($errMsg);
             $callback($errMsg, true);
             $fullContent = $errMsg;
